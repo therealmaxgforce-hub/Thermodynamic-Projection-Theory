@@ -4,13 +4,12 @@ on:
   push:
     branches:
       - archiver-stage10-number3-windows
-  pull_request:
-    branches:
-      - main
+    paths-ignore:
+      - 'WINDOWS_EVIDENCE/**'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   number3-core:
@@ -18,6 +17,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: archiver-stage10-number3-windows
 
       - name: Fetch exact WinRAR 7.23 and Sysinternals Procmon
         shell: powershell
@@ -56,7 +57,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $proc="$PWD\TOOLS\Procmon\Procmon64.exe"
-          $rar="$PWD\SPECIMENS\Rar.exe"; $unrar="$PWD\SPECIMENS\UnRAR.exe"; $winrar="$PWD\SPECIMENS\WinRAR.exe"
+          $rar="$PWD\SPECIMENS\Rar.exe"; $unrar="$PWD\SPECIMENS\UnRAR.exe"
           $work="$PWD\WORK"; New-Item -ItemType Directory -Force "$work\SRC","$work\DST","$work\ARC","EVIDENCE\TRACE" | Out-Null
           Set-Content "$work\SRC\alpha.txt" ('alpha-'*10000)
           Set-Content "$work\SRC\conflict.txt" 'source-version'
@@ -106,11 +107,24 @@ jobs:
           $rows | Export-Csv EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv -NoTypeInformation
           Get-FileHash SPECIMENS\*.exe,SPECIMENS\*.dll -Algorithm SHA256 | Export-Csv EVIDENCE\final_hashes.csv -NoTypeInformation
 
-      - name: Upload Number 3 Windows evidence
+      - name: Commit evidence back to isolated branch
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ARCHIVER_NUMBER3_WINDOWS_EVIDENCE
-          path: EVIDENCE
-          if-no-files-found: error
-          retention-days: 30
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force WINDOWS_EVIDENCE | Out-Null
+          Get-Date -Format o | Set-Content WINDOWS_EVIDENCE\run_completed_at.txt
+          if(Test-Path EVIDENCE){
+            Get-ChildItem EVIDENCE -Recurse -File | Where-Object { $_.Extension -ne '.pml' -and $_.FullName -notmatch '\\TRACE\\.*\.csv$' } | ForEach-Object {
+              $rel=$_.FullName.Substring((Resolve-Path EVIDENCE).Path.Length).TrimStart('\')
+              $dest=Join-Path WINDOWS_EVIDENCE $rel
+              New-Item -ItemType Directory -Force (Split-Path $dest -Parent) | Out-Null
+              Copy-Item $_.FullName $dest -Force
+            }
+            if(Test-Path EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv){ Copy-Item EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv WINDOWS_EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv -Force }
+            Compress-Archive -Path EVIDENCE\* -DestinationPath WINDOWS_EVIDENCE\NUMBER3_WINDOWS_RAW_EVIDENCE.zip -Force
+          }
+          git config user.name 'archiver-windows-runner'
+          git config user.email 'actions@github.com'
+          git add WINDOWS_EVIDENCE
+          git commit -m 'Add native Windows Number 3 runtime evidence' || echo 'No evidence changes to commit'
+          git push origin HEAD:archiver-stage10-number3-windows
