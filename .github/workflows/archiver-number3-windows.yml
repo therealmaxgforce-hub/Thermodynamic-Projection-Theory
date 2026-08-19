@@ -1,0 +1,113 @@
+name: ARCHIVER Stage 10 Number 3 Windows Runtime
+
+on:
+  push:
+    branches:
+      - archiver-stage10-number3-windows
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  number3-core:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact WinRAR 7.23 and Sysinternals Procmon
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force SPECIMENS,TOOLS,EVIDENCE | Out-Null
+          Invoke-WebRequest -Uri 'https://www.rarlab.com/rar/winrar-x64-723.exe' -OutFile 'SPECIMENS\winrar-x64-723.exe'
+          $h=(Get-FileHash 'SPECIMENS\winrar-x64-723.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($h -ne 'f435b24d4c2c5342c4f7c0143ef358f0f425b7b8a0972dd34d9dcf94789e9c4d'){ throw "WinRAR installer hash mismatch: $h" }
+          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile 'TOOLS\ProcessMonitor.zip'
+          Expand-Archive 'TOOLS\ProcessMonitor.zip' 'TOOLS\Procmon' -Force
+
+      - name: Silent install and freeze executable identities
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Start-Process -FilePath "$PWD\SPECIMENS\winrar-x64-723.exe" -ArgumentList '/S' -PassThru -Wait
+          "installer_exit=$($p.ExitCode)" | Set-Content EVIDENCE\install_exit.txt
+          $src="$env:ProgramFiles\WinRAR"
+          foreach($n in 'WinRAR.exe','Rar.exe','UnRAR.exe','RarExt.dll','RarExt32.dll','RarExtInstaller.exe','Uninstall.exe') { Copy-Item "$src\$n" "SPECIMENS\$n" -Force }
+          $expected=@{
+            'WinRAR.exe'='ab727aec2418a942a1adf5295efb9c676eeba39d16f7c2443e3f873fe2dfca14';
+            'Rar.exe'='1639bfccc19b6fdd9becffb154edca06f07d1f337cc61933273f5b30dfb91882';
+            'UnRAR.exe'='806b42a2ae54eb8688841500aa70b3a3e4fcbe99059e612086cf9ccdc231b5ea';
+            'RarExt.dll'='4f00f5046b05862fde74f892ddf8a87110455db4ab577083d4e9e137ed1b5a04';
+            'RarExt32.dll'='370b0304fa5aadb8352e1cea3c4d2fcd38aca511b964c127cf2b102b3501315c';
+            'RarExtInstaller.exe'='091f077e4a8ffdca19430e9775b97d3b448e0c8ffdda52fb93b98268d38356f5';
+            'Uninstall.exe'='c893bab6e0159ad6a3baea054f7341dd543ac0ca446671ce07aa93e97b540dc2'
+          }
+          $rows=@()
+          foreach($n in $expected.Keys){$a=(Get-FileHash "SPECIMENS\$n" -Algorithm SHA256).Hash.ToLowerInvariant();$ok=$a -eq $expected[$n];$rows += [pscustomobject]@{file=$n;expected=$expected[$n];actual=$a;match=$ok}; if(!$ok){throw "hash mismatch $n"}}
+          $rows | Export-Csv EVIDENCE\specimen_hashes.csv -NoTypeInformation
+
+      - name: Native Windows core runtime trace
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $proc="$PWD\TOOLS\Procmon\Procmon64.exe"
+          $rar="$PWD\SPECIMENS\Rar.exe"; $unrar="$PWD\SPECIMENS\UnRAR.exe"; $winrar="$PWD\SPECIMENS\WinRAR.exe"
+          $work="$PWD\WORK"; New-Item -ItemType Directory -Force "$work\SRC","$work\DST","$work\ARC","EVIDENCE\TRACE" | Out-Null
+          Set-Content "$work\SRC\alpha.txt" ('alpha-'*10000)
+          Set-Content "$work\SRC\conflict.txt" 'source-version'
+          Set-Content "$work\DST\conflict.txt" 'existing-destination-version'
+          Set-Content "$work\SRC\alpha.txt:EAB_STREAM" 'alternate-stream-evidence'
+          cmd /c "fsutil hardlink create `"$work\SRC\alpha_hardlink.txt`" `"$work\SRC\alpha.txt`"" | Out-Null
+          $archive="$work\ARC\number3.rar"
+          function Trace([string]$name,[scriptblock]$body){
+            & $proc /Terminate 2>$null | Out-Null; Start-Sleep -Milliseconds 500
+            $pml="$PWD\EVIDENCE\TRACE\$name.pml"; $csv="$PWD\EVIDENCE\TRACE\$name.csv"
+            & $proc /AcceptEula /Quiet /Minimized /BackingFile $pml | Out-Null; Start-Sleep 1
+            try { & $body } finally { & $proc /Terminate | Out-Null; Start-Sleep 1; & $proc /AcceptEula /Quiet /OpenLog $pml /SaveAs $csv | Out-Null }
+          }
+          Trace '01_CREATE' { & $rar a -idq $archive "$work\SRC\*"; "exit=$LASTEXITCODE" | Set-Content EVIDENCE\create_exit.txt }
+          Add-Content "$work\SRC\alpha.txt" 'update-marker'
+          Trace '02_UPDATE' { & $rar u -idq $archive "$work\SRC\*"; "exit=$LASTEXITCODE" | Set-Content EVIDENCE\update_exit.txt }
+          Trace '03_TEST' { & $rar t -idq $archive 2>&1 | Tee-Object EVIDENCE\test_valid.txt; "exit=$LASTEXITCODE" | Add-Content EVIDENCE\test_valid.txt }
+          Trace '04_EXTRACT' { & $unrar x -o+ -idq $archive "$work\DST\" 2>&1 | Tee-Object EVIDENCE\extract.txt; "exit=$LASTEXITCODE" | Add-Content EVIDENCE\extract.txt }
+          Trace '05_DELETE' { & $rar d -idq $archive 'conflict.txt' 2>&1 | Tee-Object EVIDENCE\delete.txt; "exit=$LASTEXITCODE" | Add-Content EVIDENCE\delete.txt }
+          Copy-Item $archive "$work\ARC\corrupt.rar"
+          $b=[IO.File]::ReadAllBytes("$work\ARC\corrupt.rar"); $i=[math]::Floor($b.Length/2); $b[$i]=$b[$i] -bxor 0x5a; [IO.File]::WriteAllBytes("$work\ARC\corrupt.rar",$b)
+          & $rar t -idq "$work\ARC\corrupt.rar" 2>&1 | Tee-Object EVIDENCE\test_corrupt.txt; "exit=$LASTEXITCODE" | Add-Content EVIDENCE\test_corrupt.txt
+          Get-ChildItem $work -Recurse -Force | Select-Object FullName,Length,Attributes,CreationTimeUtc,LastWriteTimeUtc | Export-Csv EVIDENCE\filesystem_after.csv -NoTypeInformation
+          Get-ChildItem "$work\SRC" -Force | ForEach-Object { try { Get-Item $_.FullName -Stream * } catch {} } | Select-Object FileName,Stream,Length | Export-Csv EVIDENCE\streams_after.csv -NoTypeInformation
+
+      - name: Registry and installation evidence
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Continue'
+          reg export 'HKCU\Software\WinRAR' EVIDENCE\HKCU_WinRAR.reg /y
+          reg export 'HKLM\Software\WinRAR' EVIDENCE\HKLM_WinRAR.reg /y
+          reg export 'HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WinRAR archiver' EVIDENCE\HKLM_Uninstall_WinRAR.reg /y
+          reg export 'HKLM\Software\Classes\CLSID\{B41DB860-64E4-11D2-9906-E49FADC173CA}' EVIDENCE\HKLM_RarExt64.reg /y
+          Get-ComputerInfo | Out-File EVIDENCE\computer_info.txt
+          whoami /all | Out-File EVIDENCE\token_whoami_all.txt
+
+      - name: Normalize Procmon evidence
+        shell: powershell
+        run: |
+          $rows=@()
+          Get-ChildItem EVIDENCE\TRACE -Filter '*.csv' | ForEach-Object {
+            $test=$_.BaseName
+            Import-Csv $_.FullName | Where-Object { $_.'Process Name' -in @('Rar.exe','UnRAR.exe','WinRAR.exe','winrar-x64-723.exe','RarExtInstaller.exe','Uninstall.exe') -and $_.Operation -match 'CreateFile|ReadFile|WriteFile|FlushBuffersFile|FileSystemControl|Reg(Create|Set|Delete|Open|Query)|Process Create|Load Image' } | ForEach-Object {
+              $rows += [pscustomobject]@{Test=$test;Time=$_.Time;'Process Name'=$_.'Process Name';PID=$_.PID;Operation=$_.Operation;Path=$_.Path;Result=$_.Result;Detail=$_.Detail}
+            }
+          }
+          $rows | Export-Csv EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv -NoTypeInformation
+          Get-FileHash SPECIMENS\*.exe,SPECIMENS\*.dll -Algorithm SHA256 | Export-Csv EVIDENCE\final_hashes.csv -NoTypeInformation
+
+      - name: Upload Number 3 Windows evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARCHIVER_NUMBER3_WINDOWS_EVIDENCE
+          path: EVIDENCE
+          if-no-files-found: error
+          retention-days: 30
