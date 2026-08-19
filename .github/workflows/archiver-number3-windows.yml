@@ -25,11 +25,23 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           New-Item -ItemType Directory -Force SPECIMENS,TOOLS,EVIDENCE | Out-Null
-          Invoke-WebRequest -Uri 'https://www.rarlab.com/rar/winrar-x64-723.exe' -OutFile 'SPECIMENS\winrar-x64-723.exe'
-          $h=(Get-FileHash 'SPECIMENS\winrar-x64-723.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
-          if($h -ne 'f435b24d4c2c5342c4f7c0143ef358f0f425b7b8a0972dd34d9dcf94789e9c4d'){ throw "WinRAR installer hash mismatch: $h" }
-          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile 'TOOLS\ProcessMonitor.zip'
-          Expand-Archive 'TOOLS\ProcessMonitor.zip' 'TOOLS\Procmon' -Force
+          try {
+            curl.exe -L --fail --retry 3 --retry-delay 2 -o 'SPECIMENS\winrar-x64-723.exe' 'https://www.rarlab.com/rar/winrar-x64-723.exe'
+            if($LASTEXITCODE -ne 0){ throw "curl WinRAR exit $LASTEXITCODE" }
+            $h=(Get-FileHash 'SPECIMENS\winrar-x64-723.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+            "winrar_sha256=$h" | Set-Content EVIDENCE\download_diagnostics.txt
+            "winrar_size=$((Get-Item 'SPECIMENS\winrar-x64-723.exe').Length)" | Add-Content EVIDENCE\download_diagnostics.txt
+            if($h -ne 'f435b24d4c2c5342c4f7c0143ef358f0f425b7b8a0972dd34d9dcf94789e9c4d'){ throw "WinRAR installer hash mismatch: $h" }
+            curl.exe -L --fail --retry 3 --retry-delay 2 -o 'TOOLS\ProcessMonitor.zip' 'https://download.sysinternals.com/files/ProcessMonitor.zip'
+            if($LASTEXITCODE -ne 0){ throw "curl Procmon exit $LASTEXITCODE" }
+            "procmon_zip_sha256=$((Get-FileHash 'TOOLS\ProcessMonitor.zip' -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content EVIDENCE\download_diagnostics.txt
+            "procmon_zip_size=$((Get-Item 'TOOLS\ProcessMonitor.zip').Length)" | Add-Content EVIDENCE\download_diagnostics.txt
+            Expand-Archive 'TOOLS\ProcessMonitor.zip' 'TOOLS\Procmon' -Force
+            Get-ChildItem 'TOOLS\Procmon' -Recurse | Select-Object FullName,Length | Out-File EVIDENCE\procmon_contents.txt
+          } catch {
+            "ERROR=$($_.Exception.Message)" | Add-Content EVIDENCE\download_diagnostics.txt
+            throw
+          }
 
       - name: Silent install and freeze executable identities
         shell: powershell
@@ -111,20 +123,21 @@ jobs:
         if: always()
         shell: powershell
         run: |
+          $ErrorActionPreference='Continue'
           New-Item -ItemType Directory -Force WINDOWS_EVIDENCE | Out-Null
           Get-Date -Format o | Set-Content WINDOWS_EVIDENCE\run_completed_at.txt
           if(Test-Path EVIDENCE){
-            Get-ChildItem EVIDENCE -Recurse -File | Where-Object { $_.Extension -ne '.pml' -and $_.FullName -notmatch '\\TRACE\\.*\.csv$' } | ForEach-Object {
-              $rel=$_.FullName.Substring((Resolve-Path EVIDENCE).Path.Length).TrimStart('\')
-              $dest=Join-Path WINDOWS_EVIDENCE $rel
-              New-Item -ItemType Directory -Force (Split-Path $dest -Parent) | Out-Null
-              Copy-Item $_.FullName $dest -Force
-            }
-            if(Test-Path EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv){ Copy-Item EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv WINDOWS_EVIDENCE\NUMBER3_WINDOWS_RUNTIME_EVENTS.csv -Force }
-            Compress-Archive -Path EVIDENCE\* -DestinationPath WINDOWS_EVIDENCE\NUMBER3_WINDOWS_RAW_EVIDENCE.zip -Force
+            Copy-Item EVIDENCE\* WINDOWS_EVIDENCE -Recurse -Force
           }
           git config user.name 'archiver-windows-runner'
           git config user.email 'actions@github.com'
           git add WINDOWS_EVIDENCE
-          git commit -m 'Add native Windows Number 3 runtime evidence' || echo 'No evidence changes to commit'
+          git diff --cached --quiet
+          if($LASTEXITCODE -eq 0){
+            Write-Host 'No evidence changes to commit'
+            exit 0
+          }
+          git commit -m 'Add native Windows Number 3 runtime evidence'
+          if($LASTEXITCODE -ne 0){ throw "git commit failed with $LASTEXITCODE" }
           git push origin HEAD:archiver-stage10-number3-windows
+          if($LASTEXITCODE -ne 0){ throw "git push failed with $LASTEXITCODE" }
