@@ -1,3 +1,4 @@
 ARCHIVER_FORENSIC_TEARDOWN
 Stage 10 Number 3 native-Windows evidence trigger
 2026-08-19
+trigger_revision=2
