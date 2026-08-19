@@ -1,0 +1,3 @@
+winrar_sha256=8ff0daf3ed564cc743c0e23ff2e253997ffc74460f9673f0b6dd037b2db4ce7b
+winrar_size=3775056
+ERROR=WinRAR installer hash mismatch: 8ff0daf3ed564cc743c0e23ff2e253997ffc74460f9673f0b6dd037b2db4ce7b
