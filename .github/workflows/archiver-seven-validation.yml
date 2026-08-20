@@ -23,16 +23,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Decode runner
+      - name: Decode exact runner from validated chunks
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $b64 = Get-Content -LiteralPath 'archiver_validation/runner.ps1.gz.b64' -Raw
-          $bytes = [Convert]::FromBase64String($b64.Trim())
+          $parts = 1..7 | ForEach-Object { Get-Content -LiteralPath ("archiver_validation/chunk{0:D2}.txt" -f $_) -Raw }
+          $b64 = (($parts | ForEach-Object { $_.Trim() }) -join '')
+          $bytes = [Convert]::FromBase64String($b64)
           $input = New-Object IO.MemoryStream(,$bytes)
           $gzip = New-Object IO.Compression.GZipStream($input,[IO.Compression.CompressionMode]::Decompress)
           $out = [IO.File]::Create((Join-Path $PWD 'runner.ps1'))
           try { $gzip.CopyTo($out) } finally { $out.Dispose(); $gzip.Dispose(); $input.Dispose() }
+          $hash = (Get-FileHash -LiteralPath (Join-Path $PWD 'runner.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '191d6bf1cc65b3f36e2479b48fd49b0e8f85bb768d514a7045d873f50198059e') { throw "Runner SHA256 mismatch: $hash" }
+          Write-Host "Exact runner hash PASS: $hash"
 
       - name: Parse with Windows PowerShell 5.1
         shell: powershell
