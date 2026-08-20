@@ -1,0 +1,55 @@
+name: ARCHIVER Seven Automated Windows Validation
+
+on:
+  push:
+    branches:
+      - archiver-seven-automated-validation
+    paths:
+      - 'archiver_validation/**'
+      - '.github/workflows/archiver-seven-validation.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-windows-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decode runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64 = Get-Content -LiteralPath 'archiver_validation/runner.ps1.gz.b64' -Raw
+          $bytes = [Convert]::FromBase64String($b64.Trim())
+          $input = New-Object IO.MemoryStream(,$bytes)
+          $gzip = New-Object IO.Compression.GZipStream($input,[IO.Compression.CompressionMode]::Decompress)
+          $out = [IO.File]::Create((Join-Path $PWD 'runner.ps1'))
+          try { $gzip.CopyTo($out) } finally { $out.Dispose(); $gzip.Dispose(); $input.Dispose() }
+
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'runner.ps1'),[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List *
+            throw "PowerShell parser found $($errors.Count) error(s)."
+          }
+          Write-Host 'PowerShell 5.1 parse PASS'
+
+      - name: Execute built-in self-test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'archiver-seven-selftest'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PWD 'runner.ps1') -SelfTest -RootOverride $root
+          if ($LASTEXITCODE -ne 0) { throw "Self-test exit code $LASTEXITCODE" }
+          $results = Join-Path $root 'evidence/RESULTS.json'
+          if (-not (Test-Path -LiteralPath $results)) { throw 'Self-test RESULTS.json missing.' }
+          $obj = Get-Content -LiteralPath $results -Raw | ConvertFrom-Json
+          if ($obj.status -ne 'PASS' -and @($obj)[0].status -ne 'PASS') { throw 'Self-test did not report PASS.' }
+          Write-Host 'Windows execution self-test PASS'
