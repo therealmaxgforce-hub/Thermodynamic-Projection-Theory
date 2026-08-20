@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23.x'
+      - name: Show preinstalled Go
+        shell: cmd
+        run: go version
       - name: Build native Windows EXE
         shell: cmd
         run: go build -trimpath -ldflags="-s -w" -o archiver_go_validation\validation.exe archiver_go_validation\main.go
