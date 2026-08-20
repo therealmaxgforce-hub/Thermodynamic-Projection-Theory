@@ -1,0 +1,27 @@
+//go:build windows
+package main
+
+import(
+ "archive/zip";"encoding/csv";"errors";"fmt";"io";"os";"os/exec";"path/filepath";"strconv";"strings";"syscall";"time";"unsafe"
+)
+var(kernel32=syscall.NewLazyDLL("kernel32.dll");advapi32=syscall.NewLazyDLL("advapi32.dll");netapi32=syscall.NewLazyDLL("netapi32.dll");pGetCurrentProcess=kernel32.NewProc("GetCurrentProcess");pCloseHandle=kernel32.NewProc("CloseHandle");pOpenProcess=kernel32.NewProc("OpenProcess");pOpenProcessToken=advapi32.NewProc("OpenProcessToken");pGetTokenInformation=advapi32.NewProc("GetTokenInformation");pCreateProcessWithTokenW=advapi32.NewProc("CreateProcessWithTokenW");pNetShareAdd=netapi32.NewProc("NetShareAdd");pNetShareDel=netapi32.NewProc("NetShareDel"))
+const(tokenQuery=0x8;tokenDuplicate=0x2;tokenAssignPrimary=0x1;tokenIntegrityLevel=25;processQueryLimitedInformation=0x1000;logonWithProfile=1;stypeDiskTree=0)
+type tml struct{Label struct{Sid uintptr;Attributes uint32}}
+type si struct{Cb uint32;Reserved,Desktop,Title uintptr;X,Y,XSize,YSize,XCountChars,YCountChars,FillAttribute,Flags uint32;ShowWindow,Reserved2 uint16;Reserved2Ptr,StdInput,StdOutput,StdError uintptr}
+type pi struct{Process,Thread uintptr;ProcessID,ThreadID uint32}
+type share2 struct{NetName uintptr;Type uint32;Remark uintptr;Permissions,MaxUses,CurrentUses uint32;Path,Password uintptr}
+func main(){root,_:=os.MkdirTemp("","archiver-go-validation-");defer os.RemoveAll(root);fmt.Println("ROOT",root)
+ if !bounded(){panic("bounded process watchdog failed")};fmt.Println("bounded process PASS")
+ p:=filepath.Join(root,"a.txt");must(os.WriteFile(p,[]byte("abc"),0644));must(os.WriteFile(p+":stream",[]byte("ads"),0644));must(os.Link(p,filepath.Join(root,"hard.txt")));fmt.Println("ADS+hardlink PASS")
+ sh:="ArchiverGoValidate_"+strconv.FormatInt(time.Now().Unix(),10);must(netShareAdd(sh,root));must(netShareDel(sh));fmt.Println("NetShareAdd/Del PASS")
+ lvl,err:=integrity();must(err);fmt.Println("integrity PASS",lvl)
+ must(zipOne(p,filepath.Join(root,"e.zip")));fmt.Println("zip evidence PASS")
+ if _,err:=exec.LookPath("explorer.exe");err==nil{if err:=probeExplorerToken();err!=nil{fmt.Println("Explorer token probe WARN",err)}else{fmt.Println("Explorer token API PASS")}}else{fmt.Println("Explorer absent on hosted runner; token probe skipped")}
+ fmt.Println("NATIVE GO WINDOWS VALIDATION PASS")}
+func must(e error){if e!=nil{panic(e)}}
+func bounded()bool{cmd:=exec.Command("ping.exe","127.0.0.1","-n","6");cmd.SysProcAttr=&syscall.SysProcAttr{CreationFlags:0x200,HideWindow:true};if cmd.Start()!=nil{return false};ch:=make(chan error,1);go func(){ch<-cmd.Wait()}();select{case<-ch:return false;case<-time.After(time.Second):_ = exec.Command("taskkill.exe","/PID",strconv.Itoa(cmd.Process.Pid),"/T","/F").Run();select{case<-ch:case<-time.After(5*time.Second):return false};return true}}
+func netShareAdd(name,path string)error{n,_:=syscall.UTF16PtrFromString(name);p,_:=syscall.UTF16PtrFromString(path);rm,_:=syscall.UTF16PtrFromString("temporary forensic validation");x:=share2{NetName:uintptr(unsafe.Pointer(n)),Type:stypeDiskTree,Remark:uintptr(unsafe.Pointer(rm)),MaxUses:0xffffffff,Path:uintptr(unsafe.Pointer(p))};var parm uint32;r,_,_:=pNetShareAdd.Call(0,2,uintptr(unsafe.Pointer(&x)),uintptr(unsafe.Pointer(&parm)));if r!=0{return fmt.Errorf("NetShareAdd %d parm %d",r,parm)};return nil}
+func netShareDel(name string)error{n,_:=syscall.UTF16PtrFromString(name);r,_,_:=pNetShareDel.Call(0,uintptr(unsafe.Pointer(n)),0);if r!=0{return fmt.Errorf("NetShareDel %d",r)};return nil}
+func integrity()(string,error){var tok uintptr;p,_,_:=pGetCurrentProcess.Call();r,_,e:=pOpenProcessToken.Call(p,tokenQuery,uintptr(unsafe.Pointer(&tok)));if r==0{return "",e};defer pCloseHandle.Call(tok);var n uint32;pGetTokenInformation.Call(tok,tokenIntegrityLevel,0,0,uintptr(unsafe.Pointer(&n)));if n==0{return "",errors.New("size")};b:=make([]byte,n);r,_,e=pGetTokenInformation.Call(tok,tokenIntegrityLevel,uintptr(unsafe.Pointer(&b[0])),uintptr(n),uintptr(unsafe.Pointer(&n)));if r==0{return "",e};_ = (*tml)(unsafe.Pointer(&b[0]));return "TokenIntegrityLevel read successfully",nil}
+func zipOne(src,dst string)error{f,e:=os.Create(dst);if e!=nil{return e};defer f.Close();z:=zip.NewWriter(f);defer z.Close();w,e:=z.Create("a.txt");if e!=nil{return e};in,e:=os.Open(src);if e!=nil{return e};defer in.Close();_,e=io.Copy(w,in);return e}
+func probeExplorerToken()error{out,e:=exec.Command("tasklist.exe","/FI","IMAGENAME eq explorer.exe","/FO","CSV","/NH").Output();if e!=nil{return e};rd:=csv.NewReader(strings.NewReader(string(out)));rec,e:=rd.Read();if e!=nil||len(rec)<2{return errors.New("no explorer")};pid,e:=strconv.ParseUint(strings.TrimSpace(rec[1]),10,32);if e!=nil{return e};ph,_,er:=pOpenProcess.Call(processQueryLimitedInformation,0,uintptr(pid));if ph==0{return er};defer pCloseHandle.Call(ph);var tok uintptr;r,_,er:=pOpenProcessToken.Call(ph,tokenQuery|tokenDuplicate|tokenAssignPrimary,uintptr(unsafe.Pointer(&tok)));if r==0{return er};defer pCloseHandle.Call(tok);cl,_:=syscall.UTF16FromString("cmd.exe /d /c exit 0");var s si;s.Cb=uint32(unsafe.Sizeof(s));var pinfo pi;r,_,er=pCreateProcessWithTokenW.Call(tok,logonWithProfile,0,uintptr(unsafe.Pointer(&cl[0])),0,0,0,uintptr(unsafe.Pointer(&s)),uintptr(unsafe.Pointer(&pinfo)));if r==0{return er};if pinfo.Process!=0{pCloseHandle.Call(pinfo.Process)};if pinfo.Thread!=0{pCloseHandle.Call(pinfo.Thread)};return nil}
