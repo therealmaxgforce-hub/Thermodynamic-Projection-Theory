@@ -7,6 +7,12 @@ on:
     paths:
       - 'archiver_validation/**'
       - '.github/workflows/archiver-seven-validation.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'archiver_validation/**'
+      - '.github/workflows/archiver-seven-validation.yml'
   workflow_dispatch:
 
 jobs:
