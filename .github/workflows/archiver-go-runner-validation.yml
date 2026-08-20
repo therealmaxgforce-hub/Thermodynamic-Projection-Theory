@@ -7,6 +7,12 @@ on:
     paths:
       - 'archiver_go_validation/**'
       - '.github/workflows/archiver-go-runner-validation.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'archiver_go_validation/**'
+      - '.github/workflows/archiver-go-runner-validation.yml'
   workflow_dispatch:
 
 jobs:
