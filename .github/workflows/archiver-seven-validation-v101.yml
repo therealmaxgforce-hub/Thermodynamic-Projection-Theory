@@ -1,0 +1,69 @@
+name: ARCHIVER Seven Automated Windows Validation v1.0.1
+
+on:
+  push:
+    branches:
+      - archiver-seven-automated-validation
+    paths:
+      - 'archiver_validation/runner_v101.ps1'
+      - '.github/workflows/archiver-seven-validation-v101.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'archiver_validation/runner_v101.ps1'
+      - '.github/workflows/archiver-seven-validation-v101.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $path=Join-Path $PWD 'archiver_validation/runner_v101.ps1'
+          $tokens=$null; $errors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)|Out-Null
+          if($errors.Count -gt 0){$errors|Format-List *; throw "Parser errors: $($errors.Count)"}
+          Write-Host 'PowerShell 5.1 parse PASS'
+
+      - name: Reject invalid try-as-expression pattern
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $text=Get-Content -LiteralPath 'archiver_validation/runner_v101.ps1' -Raw
+          if($text -match '\(try\s*\{'){throw 'Invalid try-as-expression pattern found.'}
+          Write-Host 'No invalid try-as-expression pattern found.'
+
+      - name: Execute built-in self-test
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'archiver-v101-selftest'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'archiver_validation/runner_v101.ps1' -SelfTest -RootOverride $root
+          if($LASTEXITCODE -ne 0){throw "Self-test exit code $LASTEXITCODE"}
+          $r=Get-Content -LiteralPath (Join-Path $root 'evidence/RESULTS.json') -Raw | ConvertFrom-Json
+          if(@($r)[0].status -ne 'PASS'){throw 'Self-test result is not PASS.'}
+          Write-Host 'Built-in self-test PASS'
+
+      - name: Exercise corrected A03 hardlink-after construction
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $d=Join-Path $env:RUNNER_TEMP 'a03-focused'
+          New-Item -ItemType Directory -Path $d -Force|Out-Null
+          $normal=Join-Path $d 'normal.txt'
+          $hard=Join-Path $d 'hardlink.txt'
+          'abc'|Set-Content -LiteralPath $normal
+          cmd /c "mklink /H `"$hard`" `"$normal`"" | Out-Null
+          $hardlinkAfter=@()
+          try { $hardlinkAfter=@(& fsutil.exe hardlink list $normal 2>&1) } catch { $hardlinkAfter=@() }
+          $after=[pscustomobject]@{hardlink_list=$hardlinkAfter}
+          if(@($after.hardlink_list).Count -lt 2){throw 'Focused A03 hardlink list did not contain both links.'}
+          $after | ConvertTo-Json -Depth 4 | Write-Host
+          Write-Host 'Corrected A03 construction runtime PASS'
